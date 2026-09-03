@@ -1,0 +1,62 @@
+@startuml TinyRateLimiter Architecture
+
+autonumber
+skinparam Style strictuml
+skinparam SequenceMessageAlignment center
+
+actor "Caller / API Handler" as Caller
+participant "SlidingWindowRateLimiter" as Limiter
+participant "TimeProvider" as Time
+participant "ConcurrentDictionary" as Dict
+participant "ClientState (per client)" as State
+participant "Queue<DateTimeOffset>" as Queue
+
+Caller -> Limiter : AllowRequest(clientId)
+activate Limiter
+
+Limiter -> Dict : GetOrAdd(clientId, _ => new ClientState())
+activate Dict
+Dict --> Limiter : clientState
+deactivate Dict
+
+Limiter -> State : Lock(clientState.Lock)
+activate State #LightBlue
+
+Limiter -> Time : GetUtcNow()
+activate Time
+Time --> Limiter : now
+deactivate Time
+
+note over Limiter, Queue
+  Calculate windowStart = now - window
+end note
+
+group Step 1: Evict Stale Timestamps
+    loop while Queue.Count > 0 AND Queue.Peek() <= windowStart
+        Limiter -> Queue : Dequeue()
+        activate Queue
+        Queue --> Limiter
+        deactivate Queue
+    end
+end
+
+group Step 2: Capacity Check & State Update
+    alt Queue.Count >= limit
+        Limiter <-- State : Release Lock
+        deactivate State
+        Caller <-- Limiter : false (Rejected)
+    else Queue.Count < limit
+        Limiter -> Queue : Enqueue(now)
+        activate Queue
+        Queue --> Limiter
+        deactivate Queue
+        
+        Limiter <-- State : Release Lock
+        deactivate State
+        Caller <-- Limiter : true (Allowed)
+    end
+end
+
+deactivate Limiter
+
+@enduml
