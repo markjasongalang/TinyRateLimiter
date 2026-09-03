@@ -2,18 +2,20 @@
 
 namespace TinyRateLimiter;
 
-public class RateLimiter
+public class SlidingWindowRateLimiter : IRateLimiter
 {
     private readonly int _limit;
     private readonly TimeSpan _window;
+    private readonly TimeProvider _timeProvider;
 
     // Handles dynamic key addition cleanly
     private readonly ConcurrentDictionary<string, ClientState> _clientStates = new();
 
-    public RateLimiter(int limit, TimeSpan window)
+    public SlidingWindowRateLimiter(int limit, TimeSpan window, TimeProvider? timeProvider = null)
     {
         _limit = limit;
         _window = window;
+        _timeProvider = timeProvider ?? TimeProvider.System; 
     }
 
     public bool AllowRequest(string clientId)
@@ -29,24 +31,23 @@ public class RateLimiter
          */
         lock (clientState.Lock)
         {
-            // Check window expiration
-            if (DateTime.UtcNow >= clientState.WindowStart.Add(_window))
+            DateTimeOffset now = _timeProvider.GetUtcNow();
+            var windowStart = now.Subtract(_window);
+
+            // Evict timestamps outside the rolling window 
+            while (clientState.RequestTimestamps.Count > 0 &&
+                   clientState.RequestTimestamps.Peek() <= windowStart) // (starting at the oldest timestamp)
             {
-                clientState.RequestCount = 0;
-                clientState.WindowStart = DateTime.UtcNow;
+                clientState.RequestTimestamps.Dequeue();
             }
 
-            if (clientState.RequestCount >= _limit)
+            // Reject if window capacity is reached
+            if (clientState.RequestTimestamps.Count >= _limit)
             {
                 return false;
             }
 
-            // SIMULATED RACE CONDITION GAP
-            // Multiple threads read RequestCount = 4 before any thread increments it
-            Thread.Sleep(1);
-
-            clientState.RequestCount++; // Modifies the object directly in memory
-
+            clientState.RequestTimestamps.Enqueue(now);
             return true;
         }
     }
